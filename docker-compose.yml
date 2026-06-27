@@ -1,0 +1,94 @@
+# ==========================================================================
+# Self-hosted Flarum 2.0 — full stack: app (nginx + php-fpm + Horizon +
+# realtime, all under supervisor) + MariaDB + Valkey (Redis-compatible).
+#
+# Generic: NO Traefik labels, NO external network. Put your own reverse proxy /
+# TLS in front of the published port 80, or expose it directly. The realtime
+# websocket server is also published on 6001 (and proxied at /app on port 80).
+# ==========================================================================
+
+services:
+
+  flarum:
+    build: .
+    container_name: flarum_app
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "6001:6001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 240s
+    volumes:
+      - flarum_data:/var/www/html
+    networks:
+      - flarum_net
+
+  mariadb:
+    image: mariadb:11
+    container_name: flarum_mariadb
+    restart: unless-stopped
+    command:
+      - --innodb-flush-log-at-trx-commit=2
+      - --skip-name-resolve
+      - --performance-schema=OFF
+      - --max-connections=100
+    environment:
+      - MYSQL_DATABASE=${DB_NAME:-flarum}
+      - MYSQL_USER=${DB_USER:-flarum}
+      - MYSQL_PASSWORD=${DB_PASS}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASS}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - flarum_net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  valkey:
+    image: valkey/valkey:alpine
+    container_name: flarum_valkey
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec valkey-server --requirepass "$$REDIS_PASSWORD" --maxmemory 128mb --maxmemory-policy volatile-lru
+        else
+          exec valkey-server --maxmemory 128mb --maxmemory-policy volatile-lru
+        fi
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    volumes:
+      - valkey_data:/data
+    networks:
+      - flarum_net
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ${REDIS_PASSWORD:+-a $REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  flarum_data:
+  mariadb_data:
+  valkey_data:
+
+networks:
+  flarum_net:
+    driver: bridge

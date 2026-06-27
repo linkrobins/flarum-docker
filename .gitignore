@@ -1,0 +1,10 @@
+# Local environment (secrets) — never commit.
+.env
+
+# Flarum data (when bind-mounted locally).
+flarum-data/
+flarum_data/
+
+# Editor / OS cruft.
+*.swp
+.DS_Store
