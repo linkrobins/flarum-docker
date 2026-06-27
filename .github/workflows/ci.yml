@@ -1,0 +1,94 @@
+name: CI — build + backup/restore round-trip
+
+# Builds the stack, confirms a fresh install serves, then proves the
+# backup→restore loop: plant a marker in the DB, back it up, destroy the data
+# volumes (simulating a fresh deploy), bring the stack back up, and verify the
+# marker came back — i.e. it RESTORED from the backup instead of fresh-installing.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DB_ROOT_PASS: ci-root-pass
+      MARKER: RESTORED-OK-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare a CI .env
+        run: |
+          cp .env.example .env
+          sed -i \
+            -e 's#^APP_URL=.*#APP_URL=http://localhost#' \
+            -e 's#^FORUM_TITLE=.*#FORUM_TITLE=CI Fresh Install#' \
+            -e 's#^ADMIN_PASS=.*#ADMIN_PASS=ci-admin-pass#' \
+            -e 's#^DB_PASS=.*#DB_PASS=ci-db-pass#' \
+            -e "s#^DB_ROOT_PASS=.*#DB_ROOT_PASS=${DB_ROOT_PASS}#" \
+            -e 's#^MAIL_HOST=.*#MAIL_HOST=#' \
+            .env
+
+      - name: Build + start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for the forum to come up (first-run install)
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost/ >/dev/null 2>&1; then
+              echo "forum is serving after ~$((i*10))s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::forum did not come up in time"; exit 1
+
+      - name: Verify the fresh install serves Flarum
+        run: curl -fsS http://localhost/ | grep -qi 'flarum' || { echo "::error::no Flarum markers in response"; exit 1; }
+
+      - name: Plant a marker in the database
+        run: |
+          docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum \
+            -e "UPDATE settings SET value='${MARKER}' WHERE \`key\`='forum_title';"
+
+      - name: Create a backup (backup.sh -> ./restore)
+        run: docker compose exec -T flarum backup.sh
+
+      - name: Confirm backup artifacts exist
+        run: |
+          test -s restore/database.sql.gz || { echo "::error::database.sql.gz missing"; exit 1; }
+          test -s restore/storage.tar.gz  || { echo "::error::storage.tar.gz missing"; exit 1; }
+          ls -lh restore/
+
+      - name: Destroy volumes (simulate a fresh deploy)
+        run: docker compose down -v
+
+      - name: Bring the stack back up (should RESTORE from ./restore)
+        run: docker compose up -d
+
+      - name: Wait for the forum to come up (restore path)
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://localhost/ >/dev/null 2>&1; then
+              echo "forum is serving after ~$((i*10))s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::forum did not come up after restore"; exit 1
+
+      - name: Verify it RESTORED (marker survived — not a fresh install)
+        run: |
+          TITLE=$(docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum -N -B \
+            -e "SELECT value FROM settings WHERE \`key\`='forum_title';")
+          echo "forum_title after restore: '$TITLE'"
+          if [ "$TITLE" != "${MARKER}" ]; then
+            echo "::error::restore failed — expected '${MARKER}', got '$TITLE' (looks like a fresh install)"
+            exit 1
+          fi
+          echo "Restore verified: the backed-up forum_title came back."
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --tail=300
