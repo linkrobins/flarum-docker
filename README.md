@@ -1,5 +1,7 @@
 # Self-Hosted Flarum 2.0 (Docker)
 
+[![CI — build + backup/restore round-trip](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml/badge.svg)](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml)
+
 A complete, self-contained [Flarum 2.0](https://flarum.org) stack in three
 containers — clone, set a few env vars, and `docker compose up`. Everything is
 baked into the image: nginx, php-fpm, Composer, all required PHP extensions, and
