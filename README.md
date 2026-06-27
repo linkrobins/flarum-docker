@@ -71,12 +71,47 @@ Uploads default to Flarum's local filesystem (stored in the `flarum_data`
 volume). If you want object storage, you can configure an S3-compatible adapter
 from the Uploads extension settings in the admin panel.
 
-## Data & backups
+## Data, backups & restore
 
 State lives in named Docker volumes: `flarum_data` (Flarum code + `storage/` +
-uploads), `mariadb_data` (database), `valkey_data` (cache/queue). Back these up
-with your own tooling (e.g. `docker compose exec mariadb mariadb-dump ...` and a
-volume snapshot).
+uploads), `mariadb_data` (database), `valkey_data` (cache/queue).
+
+### Create a backup
+
+Run the bundled helper inside the running container — it writes a database dump
+and an uploaded-files archive into the mounted `./restore` directory:
+
+```bash
+docker compose exec flarum backup.sh
+# -> ./restore/database.sql.gz  +  ./restore/storage.tar.gz
+```
+
+### Restore on deploy
+
+Restore happens automatically on a **fresh deploy** (empty `flarum_data` volume):
+drop a backup into `./restore` and bring the stack up — the entrypoint imports it
+**instead of** doing a fresh install.
+
+```bash
+# On a new/empty deployment:
+cp /path/to/database.sql.gz ./restore/      # required
+cp /path/to/storage.tar.gz  ./restore/      # optional (uploads/avatars)
+docker compose up -d --build
+```
+
+The DB dump is imported, `config.php` is written from your `.env`, uploaded files
+are extracted, and `flarum migrate` runs — so a backup from an **older** Flarum is
+upgraded to the running version on the way in. Notes:
+
+- Restore only triggers when there's no existing install (empty data volume); it
+  will **never** overwrite a live forum. To re-restore, start from a fresh volume.
+- File names are auto-detected (`database.sql[.gz]`, `storage.tar.gz`); override
+  with `RESTORE_DB` / `RESTORE_FILES` env vars to point at other paths.
+- Any third-party extensions your backup used must be installed too (this image
+  bundles uploads, redis, Horizon, realtime, audit, and the extension manager —
+  use the extension manager in admin to reinstall others).
+- `./restore` is git-ignored — backups contain forum data, so they're never
+  committed.
 
 ## License
 

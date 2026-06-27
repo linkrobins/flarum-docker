@@ -5,6 +5,10 @@
 flarum-data/
 flarum_data/
 
+# Backup/restore drop-zone — never commit backups (they contain forum data).
+restore/
+!restore/.gitkeep
+
 # Editor / OS cruft.
 *.swp
 .DS_Store

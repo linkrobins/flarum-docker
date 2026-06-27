@@ -42,7 +42,8 @@ RUN curl -sS --retry 5 --retry-delay 2 --retry-connrefused \
 COPY nginx.conf       /etc/nginx/conf.d/flarum.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+COPY backup.sh        /usr/local/bin/backup.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/backup.sh \
     && rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf 2>/dev/null || true
 
 WORKDIR /var/www/html

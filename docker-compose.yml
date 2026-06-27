@@ -30,6 +30,10 @@ services:
       start_period: 240s
     volumes:
       - flarum_data:/var/www/html
+      # Backup/restore drop-zone. Put database.sql[.gz] + storage.tar.gz here
+      # (see backup.sh) and they're restored on a FRESH deploy. Also where
+      # `docker compose exec flarum backup.sh` writes backups.
+      - ./restore:/restore
     networks:
       - flarum_net
 

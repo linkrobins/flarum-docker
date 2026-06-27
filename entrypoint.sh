@@ -25,6 +25,43 @@ composer_as_www() {
     run_as_www env COMPOSER_HOME="$COMPOSER_CACHE_DIR" COMPOSER_MEMORY_LIMIT=-1 composer "$@"
 }
 
+# Import a (optionally gzipped) SQL dump into the database.
+import_db() {
+    local f="$1"
+    log "Importing database dump: $f"
+    case "$f" in
+        *.gz) zcat "$f" | mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" ;;
+        *)    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$f" ;;
+    esac
+}
+
+# Write a fresh Flarum config.php from env (used by the restore path, which
+# imports the DB dump instead of running `flarum install`).
+write_config_php() {
+    cat > "$CONFIG_FILE" <<PHP
+<?php return [
+    'debug' => false,
+    'database' => [
+        'driver' => 'mariadb',
+        'host' => '${DB_HOST}',
+        'port' => 3306,
+        'database' => '${DB_NAME}',
+        'username' => '${DB_USER}',
+        'password' => '${DB_PASS}',
+        'charset' => 'utf8mb4',
+        'collation' => 'utf8mb4_unicode_ci',
+        'prefix' => '',
+        'prefix_indexes' => true,
+        'strict' => false,
+        'engine' => null,
+    ],
+    'url' => '${APP_URL}',
+    'paths' => ['api' => 'api', 'admin' => 'admin'],
+];
+PHP
+    chown www-data:www-data "$CONFIG_FILE"
+}
+
 # ── Variables ───────────────────────────────────────────────────────────────
 WORKDIR="/var/www/html"
 CONFIG_FILE="$WORKDIR/config.php"
@@ -51,6 +88,22 @@ REDIS_PASSWORD=$(clean "${REDIS_PASSWORD:-}")
 
 TARGET_FLARUM_VERSION=$(clean "${TARGET_FLARUM_VERSION:-^2.0}")
 REALTIME_ENABLED=$(echo "${REALTIME_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')
+
+# Restore-on-deploy: drop a backup in the mounted /restore dir (database.sql[.gz]
+# + optional storage.tar.gz, as produced by backup.sh) and it's imported on a
+# FRESH deploy (empty data volume) instead of a fresh install. Paths can be
+# overridden via env; otherwise the conventional /restore layout is auto-detected.
+RESTORE_DB=$(clean "${RESTORE_DB:-}")
+RESTORE_FILES=$(clean "${RESTORE_FILES:-}")
+if [ -z "$RESTORE_DB" ]; then
+    for f in /restore/database.sql.gz /restore/database.sql; do
+        [ -f "$f" ] && RESTORE_DB="$f" && break
+    done
+fi
+[ -z "$RESTORE_FILES" ] && [ -f /restore/storage.tar.gz ] && RESTORE_FILES="/restore/storage.tar.gz"
+# Only restore onto a fresh volume (no config.php) — never clobber a live forum.
+DO_RESTORE=false
+[ -n "$RESTORE_DB" ] && [ ! -f "$CONFIG_FILE" ] && DO_RESTORE=true
 
 [ -n "$APP_URL" ] || die "APP_URL is required."
 
@@ -100,9 +153,13 @@ try {
 
 # ── Fresh install (only when config.php is absent) ────────────────────────────
 if [ ! -f "$CONFIG_FILE" ]; then
-    log "No config.php — fresh Flarum install."
-    [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ] && [ -n "$ADMIN_EMAIL" ] \
-        || die "ADMIN_USER / ADMIN_PASS / ADMIN_EMAIL are required for a fresh install."
+    if [ "$DO_RESTORE" = "true" ]; then
+        log "No config.php — RESTORING from backup ($RESTORE_DB)."
+    else
+        log "No config.php — fresh Flarum install."
+        [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ] && [ -n "$ADMIN_EMAIL" ] \
+            || die "ADMIN_USER / ADMIN_PASS / ADMIN_EMAIL are required for a fresh install."
+    fi
 
     TMP_INSTALL="$WORKDIR/storage/flarum_stage"
     rm -rf "$TMP_INSTALL" && mkdir -p "$TMP_INSTALL" && chown www-data:www-data "$TMP_INSTALL"
@@ -114,7 +171,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
     find "$WORKDIR" -type d -exec chmod 775 {} + ; find "$WORKDIR" -type f -exec chmod 664 {} +
     chmod -R 775 "$WORKDIR/storage" "$WORKDIR/public/assets"
 
-    cat > "$WORKDIR/install.yml" <<YAML
+    if [ "$DO_RESTORE" = "true" ]; then
+        # Restore: import the backup DB instead of running a fresh install, and
+        # write config.php from env (the dump carries the forum's data/settings).
+        import_db "$RESTORE_DB" >> "$LOG_DIR/db_restore.log" 2>&1 \
+            || die "Database import failed — see $LOG_DIR/db_restore.log"
+        write_config_php
+        log "Database restored from backup."
+    else
+        cat > "$WORKDIR/install.yml" <<YAML
 debug: false
 baseUrl: '${APP_URL}'
 databaseConfiguration:
@@ -131,14 +196,15 @@ adminUser:
 settings:
   forum_title: '${FORUM_TITLE}'
 YAML
-    chown www-data:www-data "$WORKDIR/install.yml"
+        chown www-data:www-data "$WORKDIR/install.yml"
 
-    log "Running Flarum CLI installer..."
-    cd "$WORKDIR"
-    run_as_www php flarum install --file=install.yml >> "$LOG_DIR/flarum_install.log" 2>&1 \
-        || die "Flarum install failed — see $LOG_DIR/flarum_install.log"
-    rm -f "$WORKDIR/install.yml"
-    log "Flarum installed."
+        log "Running Flarum CLI installer..."
+        cd "$WORKDIR"
+        run_as_www php flarum install --file=install.yml >> "$LOG_DIR/flarum_install.log" 2>&1 \
+            || die "Flarum install failed — see $LOG_DIR/flarum_install.log"
+        rm -f "$WORKDIR/install.yml"
+        log "Flarum installed."
+    fi
 fi
 
 # Keep config.php in sync with the DB + base URL on every boot.
@@ -151,6 +217,15 @@ if [ -f "$CONFIG_FILE" ]; then
         -e "s/'password' => '[^']*'/'password' => '${DB_PASS}'/g" \
         -e "s~'url' => '[^']*'~'url' => '${APP_URL}'~g" \
         "$CONFIG_FILE"
+fi
+
+# Restore uploaded files (storage/ + public/assets — avatars, fof/upload files)
+# from the backup archive, on a fresh restore deploy.
+if [ "$DO_RESTORE" = "true" ] && [ -n "$RESTORE_FILES" ] && [ -f "$RESTORE_FILES" ]; then
+    log "Restoring files from $RESTORE_FILES..."
+    tar -xzf "$RESTORE_FILES" -C "$WORKDIR" >> "$LOG_DIR/files_restore.log" 2>&1 \
+        || warn "File restore failed (non-fatal) — see $LOG_DIR/files_restore.log"
+    chown -R www-data:www-data "$WORKDIR/storage" "$WORKDIR/public/assets" 2>/dev/null || true
 fi
 
 # ── Required extensions (hard-require — fail the boot on a composer error) ─────
