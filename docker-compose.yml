@@ -10,6 +10,9 @@
 services:
 
   flarum:
+    # Prebuilt image published to GitHub Container Registry. `docker compose pull`
+    # grabs it; `build: .` is the local fallback (used by `up --build`).
+    image: ghcr.io/linkrobins/flarum-docker:latest
     build: .
     container_name: flarum_app
     restart: unless-stopped

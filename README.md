@@ -35,6 +35,19 @@ $EDITOR .env          # set APP_URL, admin creds, and the DB/Redis passwords
 docker compose up -d --build
 ```
 
+> **Prefer the prebuilt image?** A multi-arch image (amd64 + arm64) is published to
+> the GitHub Container Registry on every release, so you can skip the local build:
+>
+> ```bash
+> docker compose pull && docker compose up -d
+> # or pull directly:
+> docker pull ghcr.io/linkrobins/flarum-docker:latest
+> ```
+>
+> The compose file already references `ghcr.io/linkrobins/flarum-docker:latest`
+> (with `build: .` as a fallback). Pin a version with a tag, e.g.
+> `ghcr.io/linkrobins/flarum-docker:1.0`.
+
 First boot installs Flarum (Composer create-project + migrations + extensions),
 which takes roughly **1–2 minutes**. Watch progress with:
 
