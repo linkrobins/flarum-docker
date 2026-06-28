@@ -88,25 +88,47 @@ docker compose exec flarum backup.sh
 # -> ./restore/database.sql.gz  +  ./restore/storage.tar.gz
 ```
 
-### Restore on deploy
+### Where is `./restore`?
 
-Restore happens automatically on a **fresh deploy** (empty `flarum_data` volume):
-drop a backup into `./restore` and bring the stack up — the entrypoint imports it
-**instead of** doing a fresh install.
+It's the **`restore/` folder that ships in this repo**, right next to
+`docker-compose.yml` — so after you clone, it already exists. Put your backup
+files in there. (It's mounted into the container at `/restore`.)
+
+### Restore on a fresh deploy
+
+On a **fresh deploy** (empty `flarum_data` volume — i.e. you haven't set the
+forum up yet), drop a backup into `restore/` and bring the stack up. The
+entrypoint imports it **instead of** doing a fresh install.
 
 ```bash
-# On a new/empty deployment:
 cp /path/to/database.sql.gz ./restore/      # required
 cp /path/to/storage.tar.gz  ./restore/      # optional (uploads/avatars)
 docker compose up -d --build
 ```
 
+### Restore into a site you've ALREADY set up
+
+If you've already installed the forum and now want to load a backup into it
+(migrating in, or recovering), set **`RESTORE_FORCE=true`** in your `.env`, put
+the backup in `restore/`, and redeploy:
+
+```bash
+echo 'RESTORE_FORCE=true' >> .env
+cp /path/to/database.sql.gz ./restore/
+docker compose up -d              # imports OVER the existing forum
+```
+
+This is deliberately opt-in so a stray backup can't wipe a live forum. It's also
+**one-shot**: once a backup is imported, a plain restart won't re-import it — only
+a *different* backup will. (Leave `RESTORE_FORCE` off again afterward.)
+
 The DB dump is imported, `config.php` is written from your `.env`, uploaded files
 are extracted, and `flarum migrate` runs — so a backup from an **older** Flarum is
 upgraded to the running version on the way in. Notes:
 
-- Restore only triggers when there's no existing install (empty data volume); it
-  will **never** overwrite a live forum. To re-restore, start from a fresh volume.
+- On a fresh volume, restore is automatic. On an existing forum it requires
+  `RESTORE_FORCE=true` (above) — so a stray backup can never wipe a live forum on
+  a restart.
 - File names are auto-detected (`database.sql[.gz]`, `storage.tar.gz`); override
   with `RESTORE_DB` / `RESTORE_FILES` env vars to point at other paths.
 - Any third-party extensions your backup used must be installed too (this image

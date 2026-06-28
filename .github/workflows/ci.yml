@@ -17,6 +17,7 @@ jobs:
     env:
       DB_ROOT_PASS: ci-root-pass
       MARKER: RESTORED-OK-${{ github.run_id }}
+      MARKER2: FORCE-RESTORED-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,6 +89,39 @@ jobs:
             exit 1
           fi
           echo "Restore verified: the backed-up forum_title came back."
+
+      # ── Forced restore: load a backup INTO an already-installed forum ──────────
+      - name: Plant a second marker + back up again
+        run: |
+          docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum \
+            -e "UPDATE settings SET value='${MARKER2}' WHERE \`key\`='forum_title';"
+          docker compose exec -T flarum backup.sh
+
+      - name: Force-restore into the EXISTING forum (RESTORE_FORCE=true)
+        run: |
+          echo 'RESTORE_FORCE=true' >> .env
+          docker compose up -d --force-recreate flarum
+
+      - name: Wait for the forum to come up (forced restore)
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost/ >/dev/null 2>&1; then
+              echo "forum is serving after ~$((i*10))s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::forum did not come up after forced restore"; exit 1
+
+      - name: Verify the forced restore imported the new backup
+        run: |
+          TITLE=$(docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum -N -B \
+            -e "SELECT value FROM settings WHERE \`key\`='forum_title';")
+          echo "forum_title after forced restore: '$TITLE'"
+          if [ "$TITLE" != "${MARKER2}" ]; then
+            echo "::error::forced restore failed — expected '${MARKER2}', got '$TITLE'"
+            exit 1
+          fi
+          echo "Forced restore verified."
 
       - name: Dump container logs on failure
         if: failure()

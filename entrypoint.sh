@@ -90,20 +90,39 @@ TARGET_FLARUM_VERSION=$(clean "${TARGET_FLARUM_VERSION:-^2.0}")
 REALTIME_ENABLED=$(echo "${REALTIME_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')
 
 # Restore-on-deploy: drop a backup in the mounted /restore dir (database.sql[.gz]
-# + optional storage.tar.gz, as produced by backup.sh) and it's imported on a
-# FRESH deploy (empty data volume) instead of a fresh install. Paths can be
-# overridden via env; otherwise the conventional /restore layout is auto-detected.
+# + optional storage.tar.gz, as produced by backup.sh) and it's imported instead
+# of installing fresh. Paths can be overridden via env; otherwise the
+# conventional /restore layout is auto-detected.
 RESTORE_DB=$(clean "${RESTORE_DB:-}")
 RESTORE_FILES=$(clean "${RESTORE_FILES:-}")
+RESTORE_FORCE=$(echo "${RESTORE_FORCE:-false}" | tr '[:upper:]' '[:lower:]')
 if [ -z "$RESTORE_DB" ]; then
     for f in /restore/database.sql.gz /restore/database.sql; do
         [ -f "$f" ] && RESTORE_DB="$f" && break
     done
 fi
 [ -z "$RESTORE_FILES" ] && [ -f /restore/storage.tar.gz ] && RESTORE_FILES="/restore/storage.tar.gz"
-# Only restore onto a fresh volume (no config.php) — never clobber a live forum.
+
+# Was a forum already installed before this boot?
+HAD_CONFIG=false; [ -f "$CONFIG_FILE" ] && HAD_CONFIG=true
+# Decide whether to restore this boot:
+#   • fresh volume (no install) + a backup present              -> restore
+#   • existing forum + RESTORE_FORCE=true + a backup we haven't
+#     already imported (different sha256)                       -> restore OVER it
+# The consumed-hash marker makes a forced restore one-shot, so a plain restart
+# can never silently re-clobber a live forum (only a NEW backup restores again).
 DO_RESTORE=false
-[ -n "$RESTORE_DB" ] && [ ! -f "$CONFIG_FILE" ] && DO_RESTORE=true
+RESTORE_HASH=""
+CONSUMED_FILE="$WORKDIR/storage/.restore_consumed"
+if [ -n "$RESTORE_DB" ]; then
+    RESTORE_HASH=$(sha256sum "$RESTORE_DB" 2>/dev/null | cut -d' ' -f1)
+    if [ "$HAD_CONFIG" = "false" ]; then
+        DO_RESTORE=true
+    elif [ "$RESTORE_FORCE" = "true" ]; then
+        PREV=$( [ -f "$CONSUMED_FILE" ] && cat "$CONSUMED_FILE" 2>/dev/null || echo "" )
+        [ "$RESTORE_HASH" != "$PREV" ] && DO_RESTORE=true
+    fi
+fi
 
 [ -n "$APP_URL" ] || die "APP_URL is required."
 
@@ -219,8 +238,19 @@ if [ -f "$CONFIG_FILE" ]; then
         "$CONFIG_FILE"
 fi
 
+# Forced restore OVER an existing forum (RESTORE_FORCE=true). The fresh-volume
+# case is handled in the install branch above; this covers "I already set up the
+# site and now want to restore a backup into it." mysqldump's DROP TABLE IF
+# EXISTS replaces the tables; the migrate step below reconciles the schema.
+if [ "$DO_RESTORE" = "true" ] && [ "$HAD_CONFIG" = "true" ]; then
+    warn "RESTORE_FORCE: importing the backup OVER the existing forum ($RESTORE_DB)."
+    import_db "$RESTORE_DB" >> "$LOG_DIR/db_restore.log" 2>&1 \
+        || die "Forced database import failed — see $LOG_DIR/db_restore.log"
+    log "Existing database replaced from backup."
+fi
+
 # Restore uploaded files (storage/ + public/assets — avatars, fof/upload files)
-# from the backup archive, on a fresh restore deploy.
+# from the backup archive (both the fresh and forced restore paths).
 if [ "$DO_RESTORE" = "true" ] && [ -n "$RESTORE_FILES" ] && [ -f "$RESTORE_FILES" ]; then
     log "Restoring files from $RESTORE_FILES..."
     tar -xzf "$RESTORE_FILES" -C "$WORKDIR" >> "$LOG_DIR/files_restore.log" 2>&1 \
@@ -362,6 +392,13 @@ php -r "
 
 log "Clearing Flarum cache..."
 run_as_www php "$WORKDIR/flarum" cache:clear >> "$LOG_DIR/cache_clear.log" 2>&1 || warn "cache:clear failed (non-fatal)"
+
+# Mark this backup consumed so a forced restore is one-shot: a plain restart
+# won't re-import it (only a different backup will). Cleared with the volume.
+if [ "$DO_RESTORE" = "true" ] && [ -n "$RESTORE_HASH" ]; then
+    echo "$RESTORE_HASH" > "$CONSUMED_FILE" 2>/dev/null || true
+    chown www-data:www-data "$CONSUMED_FILE" 2>/dev/null || true
+fi
 
 # ── Flarum scheduler cron (runs as www-data) ──────────────────────────────────
 ( crontab -u www-data -l 2>/dev/null | grep -v "schedule:run"
