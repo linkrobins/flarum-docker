@@ -50,4 +50,15 @@ WORKDIR /var/www/html
 
 EXPOSE 80 6001
 
+# docker-compose.yml declares the same check, but a compose-level healthcheck
+# does not travel with the image — anyone running `docker run`, or pulling this
+# into their own orchestrator, gets nothing. Declaring it here makes the image
+# self-describing; compose's copy simply overrides it with identical values.
+#
+# The long start period covers first boot: composer create-project, migrations
+# and extension installs take 1-2 minutes on a cold volume, and the container
+# must not be declared unhealthy while that is still legitimately running.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=240s --retries=5 \
+    CMD curl -fsS -o /dev/null http://127.0.0.1/ || exit 1
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

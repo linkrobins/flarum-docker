@@ -1,0 +1,144 @@
+# ==========================================================================
+# Flarum 2.0 behind Traefik, with automatic Let's Encrypt certificates.
+#
+# The stack in the repository root ships no TLS on purpose, so it stays generic.
+# This is the same app image wired to Traefik for the common case: one host, one
+# forum, a real certificate, HTTP redirected to HTTPS.
+#
+# Differences from the root compose: Traefik is added, and the flarum service
+# publishes NO ports — Traefik reaches it over the internal network, so the
+# forum is never also served over plain HTTP on :80.
+#
+#   1. cp ../../.env.example .env
+#   2. edit .env — set APP_URL=https://forum.example.com (https, not http)
+#      and add the two values this example needs:
+#        FORUM_HOST=forum.example.com
+#        ACME_EMAIL=you@example.com
+#   3. mkdir -p restore
+#   4. docker compose up -d
+#
+# DNS for FORUM_HOST must already resolve to this machine before the first
+# start, or the ACME HTTP challenge fails and Traefik serves its default cert.
+# ==========================================================================
+
+services:
+
+  traefik:
+    image: traefik:v3.1
+    container_name: flarum_traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # Flarum builds absolute URLs from APP_URL, so serving the same forum on
+      # both schemes gives mixed-content breakage. Redirect rather than allow it.
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/letsencrypt
+      # Read-only: Traefik only needs to read container labels.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - flarum_net
+
+  flarum:
+    image: ghcr.io/linkrobins/flarum-docker:latest
+    container_name: flarum_app
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 240s
+    volumes:
+      - flarum_data:/var/www/html
+      - ./restore:/restore
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=flarum_net
+      - traefik.http.routers.flarum.rule=Host(`${FORUM_HOST:?set FORUM_HOST in .env}`)
+      - traefik.http.routers.flarum.entrypoints=websecure
+      - traefik.http.routers.flarum.tls.certresolver=le
+      - traefik.http.routers.flarum.service=flarum
+      # Port 80 inside the container. nginx also proxies the realtime websocket
+      # at /app, so a single service covers both the forum and live updates —
+      # Traefik forwards Upgrade/Connection headers by default.
+      - traefik.http.services.flarum.loadbalancer.server.port=80
+    networks:
+      - flarum_net
+
+  mariadb:
+    image: mariadb:11
+    container_name: flarum_mariadb
+    restart: unless-stopped
+    command:
+      - --innodb-flush-log-at-trx-commit=2
+      - --skip-name-resolve
+      - --performance-schema=OFF
+      - --max-connections=100
+    environment:
+      - MYSQL_DATABASE=${DB_NAME:-flarum}
+      - MYSQL_USER=${DB_USER:-flarum}
+      - MYSQL_PASSWORD=${DB_PASS}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASS}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    networks:
+      - flarum_net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  valkey:
+    image: valkey/valkey:alpine
+    container_name: flarum_valkey
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec valkey-server --requirepass "$$REDIS_PASSWORD" --maxmemory 128mb --maxmemory-policy volatile-lru
+        else
+          exec valkey-server --maxmemory 128mb --maxmemory-policy volatile-lru
+        fi
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    volumes:
+      - valkey_data:/data
+    networks:
+      - flarum_net
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ${REDIS_PASSWORD:+-a $REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  flarum_data:
+  mariadb_data:
+  valkey_data:
+  letsencrypt:
+
+networks:
+  flarum_net:

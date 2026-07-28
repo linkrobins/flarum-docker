@@ -3,10 +3,20 @@
 [![CI — build + backup/restore round-trip](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml/badge.svg)](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml)
 
 A complete, self-contained [Flarum 2.0](https://flarum.org) stack in three
-containers — clone, set a few env vars, and `docker compose up`. Everything is
-baked into the image: nginx, php-fpm, Composer, all required PHP extensions, and
-the boot script. There is **no runtime download** of a setup script, no external
-services, and no telemetry.
+containers — clone, set a few env vars, and `docker compose up`.
+
+Two things set this apart:
+
+- **It runs Flarum 2.0**, not 1.x. Horizon, Realtime, the audit log and the
+  Extension Manager are wired up and working out of the box.
+- **Backup and restore are part of the product, not an exercise for the reader.**
+  A dump-and-reimport round trip runs in CI on every push, so the restore path
+  is tested rather than assumed — including restoring a backup from an older
+  Flarum into a newer one.
+
+Everything is baked into the image: nginx, php-fpm, Composer, all required PHP
+extensions, and the boot script. There is **no runtime download** of a setup
+script, no external services, and no telemetry.
 
 ## What you get
 
@@ -66,6 +76,11 @@ no Traefik labels** so it stays generic. In production put your own reverse prox
 (Caddy, Traefik, nginx, a cloud load balancer, …) in front to terminate HTTPS,
 and set `APP_URL=https://...`. The app honours `X-Forwarded-Proto`, so Flarum and
 the realtime client behave correctly behind a TLS-terminating proxy.
+
+If you don't already run a proxy, [`examples/traefik`](examples/traefik) is a
+ready-made stack with Traefik in front: HTTPS, automatic Let's Encrypt
+certificates, HTTP redirected to HTTPS, and the app container publishing no
+ports of its own.
 
 ## Configuration
 
