@@ -141,7 +141,15 @@ jobs:
   # failed build/backup/restore is never published.
   build:
     needs: roundtrip
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # workflow_dispatch is included so the publish path can be exercised from a
+    # branch. Without it these jobs only ever run on main or a tag, which means
+    # a change to the build itself cannot be tested before it is merged — the
+    # pull request would show a green roundtrip and tell you nothing about
+    # whether the image still publishes.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     strategy:
       fail-fast: false
       matrix:
