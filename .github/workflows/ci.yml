@@ -188,7 +188,11 @@ jobs:
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${{ steps.build.outputs.digest }}"
+          # Store the BARE hex, not the full "sha256:..." digest:
+          # actions/upload-artifact rejects ':' in a filename. The merge job
+          # puts the sha256: prefix back when it builds the manifest.
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
           # One artifact per arch; the merge job globs them back together.
