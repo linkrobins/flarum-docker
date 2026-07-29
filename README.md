@@ -14,9 +14,14 @@ Two things set this apart:
   is tested rather than assumed — including restoring a backup from an older
   Flarum into a newer one.
 
-Everything is baked into the image: nginx, php-fpm, Composer, all required PHP
-extensions, and the boot script. There is **no runtime download** of a setup
-script, no external services, and no telemetry.
+**Flarum itself is in the image, at a pinned version.** It is not fetched from
+Packagist when your container starts, so the same image tag always installs the
+same forum, a first boot needs no internet access, and an upstream outage cannot
+break a new install. The exact version set lives in
+[`skeleton/`](skeleton/) and moves only in a reviewed pull request.
+
+Everything else is baked in too: nginx, php-fpm, Composer, all required PHP
+extensions, and the boot script. No external services, and no telemetry.
 
 ## What you get
 
