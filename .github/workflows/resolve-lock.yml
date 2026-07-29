@@ -1,0 +1,102 @@
+# Resolves the pinned Flarum skeleton and emits composer.json + composer.lock.
+#
+# Step one of #2. The image currently resolves Flarum from Packagist on first
+# container start, at `^2.0` with --stability=beta, plus six extensions at bare
+# `*`. Seven floating constraints, so two people starting the same image tag a
+# week apart can get different forums, and there is no offline install at all.
+#
+# The lock this produces is what makes the image reproducible. It is generated
+# here rather than on a laptop because resolution needs PHP 8.3 with the exact
+# extension set the image ships — resolve on a machine missing intl or exif and
+# composer happily picks versions production cannot run.
+#
+# Run it from the Actions tab, download the artifact, commit the two files.
+# That is also the update path: to move Flarum, re-run with a new version and
+# commit the result, so a version bump is a reviewable diff instead of
+# something that happens silently the next time a container boots.
+name: Resolve skeleton lock
+
+on:
+  workflow_dispatch:
+    inputs:
+      flarum_version:
+        description: 'Flarum version to pin (2.0 has no stable release yet — rc is expected)'
+        required: true
+        default: '2.0.0-rc.5'
+      stability:
+        description: 'Minimum stability. beta is required while 2.0 is a release candidate.'
+        required: true
+        default: 'beta'
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Must match the Dockerfile's install-php-extensions line. A resolve on a
+      # different extension set produces a lock the image cannot satisfy.
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: bcmath, ctype, curl, dom, exif, fileinfo, filter, gd, intl, mbstring, openssl, pdo, pdo_mysql, session, sodium, tokenizer, xml, zip, redis, pcntl, sockets
+          coverage: none
+
+      - name: Resolve the skeleton
+        env:
+          VER: ${{ inputs.flarum_version }}
+          STABILITY: ${{ inputs.stability }}
+        run: |
+          set -euo pipefail
+          # Same package set the entrypoint installs today, so the lock
+          # describes the forum this image has always produced — only pinned.
+          composer create-project "flarum/flarum:${VER}" /tmp/skel \
+            --stability="${STABILITY}" --no-interaction --no-progress
+          cd /tmp/skel
+          composer require --no-interaction --no-progress \
+            fof/upload fof/redis fof/horizon \
+            flarum/realtime flarum/audit flarum/extension-manager
+
+      - name: Report what got pinned
+        run: |
+          cd /tmp/skel
+          echo "### Resolved" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          php -r '
+            $l = json_decode(file_get_contents("composer.lock"), true);
+            printf("packages: %d\n", count($l["packages"]));
+            foreach ($l["packages"] as $p) {
+              if (preg_match("#^(flarum|fof)/#", $p["name"])) {
+                printf("%-34s %s\n", $p["name"], $p["version"]);
+              }
+            }
+          ' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Fails the run rather than shipping a lock with known-vulnerable
+      # packages in it. Pinning a vulnerability is worse than floating past it.
+      - name: Audit the resolved set
+        run: |
+          cd /tmp/skel
+          composer audit --locked --format=json > /tmp/audit.json || true
+          php -r '
+            $a = json_decode(file_get_contents("/tmp/audit.json"), true)["advisories"] ?? [];
+            if ($a) {
+              foreach ($a as $pkg => $items) {
+                foreach ($items as $i) {
+                  printf("%s: %s (%s)\n", $pkg, $i["title"] ?? "?", $i["severity"] ?? "?");
+                }
+              }
+              exit(1);
+            }
+            echo "no advisories\n";
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skeleton-lock
+          path: |
+            /tmp/skel/composer.json
+            /tmp/skel/composer.lock
+          if-no-files-found: error
