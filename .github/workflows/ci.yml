@@ -76,17 +76,39 @@ jobs:
       # attribute to this change months later.
       #
       # Runs the same way the Extension Manager does: composer, as www-data,
-      # against the volume. fof/doorman is small and has a stable 2.0 release.
+      # against the volume.
+      #
+      # The extension is chosen so a failure here can only mean the volume is
+      # wrong. linkrobins/clipboard declares flarum/core ^2.0, has zero
+      # dependencies of its own, and runs on a live 2.0 forum. An earlier
+      # version of this step used fof/doorman and failed — not because the
+      # seeded volume was broken (composer require, extension:enable and
+      # cache:clear all succeeded) but because doorman's Flarum 2 release is a
+      # beta that 500s against an RC core. That conflated "can the Extension
+      # Manager write here" with "is this extension compatible", and only the
+      # first has anything to do with baking Flarum into the image.
+      #
+      # Removed again afterwards: the restore steps below rebuild the volume
+      # from the image, which would not contain a third-party extension the
+      # backup's database still had enabled.
       - name: Extension Manager can still install into the seeded volume
         run: |
           docker compose exec -T -u www-data \
             -e COMPOSER_HOME=/var/www/html/storage/composer-cache \
             -e COMPOSER_MEMORY_LIMIT=-1 \
-            flarum composer require fof/doorman --no-interaction --no-progress
-          docker compose exec -T -u www-data flarum php flarum extension:enable fof-doorman
+            flarum composer require linkrobins/clipboard --no-interaction --no-progress
+          docker compose exec -T -u www-data flarum php flarum extension:enable linkrobins-clipboard
           docker compose exec -T -u www-data flarum php flarum cache:clear
           curl -fsS http://localhost/ | grep -qi 'flarum' \
             || { echo "::error::forum stopped serving after an extension install"; exit 1; }
+          docker compose exec -T -u www-data flarum php flarum extension:disable linkrobins-clipboard
+          docker compose exec -T -u www-data \
+            -e COMPOSER_HOME=/var/www/html/storage/composer-cache \
+            -e COMPOSER_MEMORY_LIMIT=-1 \
+            flarum composer remove linkrobins/clipboard --no-interaction --no-progress
+          docker compose exec -T -u www-data flarum php flarum cache:clear
+          curl -fsS http://localhost/ | grep -qi 'flarum' \
+            || { echo "::error::forum stopped serving after the extension was removed"; exit 1; }
 
       - name: Plant a marker in the database
         run: |
