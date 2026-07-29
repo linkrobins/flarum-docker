@@ -86,7 +86,24 @@ REDIS_HOST=$(clean "${REDIS_HOST:-valkey}")
 REDIS_PORT=$(clean "${REDIS_PORT:-6379}")
 REDIS_PASSWORD=$(clean "${REDIS_PASSWORD:-}")
 
+# Whether the operator pinned a version themselves. Checked BEFORE defaulting,
+# because the default is exactly what "they said nothing" looks like afterwards.
+# Setting TARGET_FLARUM_VERSION is the deliberate opt-out from the baked
+# skeleton: it means "go and resolve this from Packagist instead", which is the
+# old behaviour and still supported.
+TARGET_FLARUM_VERSION_SET=$([ -n "${TARGET_FLARUM_VERSION:-}" ] && echo true || echo false)
 TARGET_FLARUM_VERSION=$(clean "${TARGET_FLARUM_VERSION:-^2.0}")
+
+# Seed from the image unless asked otherwise. The guard on composer.json keeps
+# this correct for an image built before the skeleton existed, where the
+# directory is simply absent.
+FLARUM_SKELETON="${FLARUM_SKELETON:-/opt/flarum-skeleton}"
+FLARUM_SKELETON_VERSION="${FLARUM_SKELETON_VERSION:-unknown}"
+if [ "$TARGET_FLARUM_VERSION_SET" = "false" ] && [ -f "$FLARUM_SKELETON/composer.json" ]; then
+    FLARUM_FROM_SKELETON=true
+else
+    FLARUM_FROM_SKELETON=false
+fi
 REALTIME_ENABLED=$(echo "${REALTIME_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')
 
 # Restore-on-deploy: drop a backup in the mounted /restore dir (database.sql[.gz]
@@ -182,9 +199,23 @@ if [ ! -f "$CONFIG_FILE" ]; then
 
     TMP_INSTALL="$WORKDIR/storage/flarum_stage"
     rm -rf "$TMP_INSTALL" && mkdir -p "$TMP_INSTALL" && chown www-data:www-data "$TMP_INSTALL"
-    log "composer create-project flarum/flarum:${TARGET_FLARUM_VERSION}..."
-    composer_as_www create-project "flarum/flarum:${TARGET_FLARUM_VERSION}" --stability=beta "$TMP_INSTALL" --no-interaction \
-        >> "$LOG_DIR/composer_install.log" 2>&1 || die "composer create-project failed — see $LOG_DIR/composer_install.log"
+
+    # Seed from the skeleton baked into the image. No Packagist, no resolution,
+    # and the same image tag always produces the same forum — which was the
+    # whole point of issue #2. Falls back to resolving over the network only
+    # when the operator deliberately asked for a different version, or when the
+    # image predates the skeleton.
+    if [ "$FLARUM_FROM_SKELETON" = "true" ]; then
+        log "Seeding Flarum ${FLARUM_SKELETON_VERSION} from the baked skeleton (no network)."
+        cp -a "$FLARUM_SKELETON/." "$TMP_INSTALL/" \
+            || die "could not copy the baked skeleton from $FLARUM_SKELETON"
+        chown -R www-data:www-data "$TMP_INSTALL"
+    else
+        log "composer create-project flarum/flarum:${TARGET_FLARUM_VERSION}..."
+        composer_as_www create-project "flarum/flarum:${TARGET_FLARUM_VERSION}" --stability=beta "$TMP_INSTALL" --no-interaction \
+            >> "$LOG_DIR/composer_install.log" 2>&1 || die "composer create-project failed — see $LOG_DIR/composer_install.log"
+    fi
+
     cp -an "$TMP_INSTALL/." "$WORKDIR/" && rm -rf "$TMP_INSTALL"
     chown -R www-data:www-data "$WORKDIR"
     find "$WORKDIR" -type d -exec chmod 775 {} + ; find "$WORKDIR" -type f -exec chmod 664 {} +

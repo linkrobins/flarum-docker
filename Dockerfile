@@ -38,6 +38,41 @@ RUN curl -sS --retry 5 --retry-delay 2 --retry-connrefused \
         https://getcomposer.org/installer \
     | php -- --install-dir=/usr/local/bin --filename=composer
 
+# ── The pinned Flarum skeleton ───────────────────────────────────────────────
+# Flarum itself, resolved at BUILD time from the committed lock rather than
+# from Packagist when a container first starts. Build-time network is fine and
+# reproducible — the lock decides what gets installed. Runtime network is not:
+# it made the same image tag produce different forums a week apart and left no
+# offline install path at all. See issue #2 and skeleton/README.md.
+#
+# create-project supplies the skeleton's OWN files (index.php, the flarum CLI,
+# public/, storage/) which are part of the flarum/flarum package and never
+# appear in vendor/. --no-install skips dependency resolution, because the
+# committed lock replaces its composer.json immediately below and decides that.
+ARG FLARUM_VERSION=2.0.0-rc.5
+ENV FLARUM_SKELETON=/opt/flarum-skeleton
+ENV FLARUM_SKELETON_VERSION=${FLARUM_VERSION}
+
+RUN COMPOSER_HOME=/tmp/composer composer create-project \
+        "flarum/flarum:${FLARUM_VERSION}" "$FLARUM_SKELETON" \
+        --stability=beta --no-install --no-interaction --no-progress
+
+COPY skeleton/composer.json skeleton/composer.lock ${FLARUM_SKELETON}/
+
+# Fail the build rather than ship a skeleton whose files and lock disagree: the
+# ARG picks the package that supplies the root files, the lock picks everything
+# else, and nothing else would notice them drifting apart.
+RUN set -eu; \
+    locked="$(php -r '$l = json_decode(file_get_contents(getenv("FLARUM_SKELETON")."/composer.lock"), true); foreach ($l["packages"] as $p) { if ($p["name"] === "flarum/core") { echo ltrim($p["version"], "v"); exit; } } exit(1);')"; \
+    if [ "$locked" != "${FLARUM_VERSION}" ]; then \
+        echo "FLARUM_VERSION=${FLARUM_VERSION} but skeleton/composer.lock pins flarum/core $locked" >&2; \
+        exit 1; \
+    fi; \
+    cd "$FLARUM_SKELETON"; \
+    COMPOSER_HOME=/tmp/composer composer install \
+        --no-dev --no-interaction --no-progress --optimize-autoloader; \
+    rm -rf /tmp/composer
+
 # Baked config + boot scripts (no runtime download).
 COPY nginx.conf       /etc/nginx/conf.d/flarum.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
