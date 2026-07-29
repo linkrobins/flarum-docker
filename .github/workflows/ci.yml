@@ -67,6 +67,27 @@ jobs:
           fi
           echo "$logs" | grep 'from the baked skeleton'
 
+      # The one behaviour baking Flarum into the image could plausibly disturb.
+      # The volume is still meant to be a writable Composer project — merely
+      # SEEDED from the image rather than resolved from the network — and the
+      # Extension Manager depends on exactly that. A wrong owner or mode on the
+      # copied tree would leave the forum serving perfectly while silently
+      # refusing every extension install, which is not a failure anyone would
+      # attribute to this change months later.
+      #
+      # Runs the same way the Extension Manager does: composer, as www-data,
+      # against the volume. fof/doorman is small and has a stable 2.0 release.
+      - name: Extension Manager can still install into the seeded volume
+        run: |
+          docker compose exec -T -u www-data \
+            -e COMPOSER_HOME=/var/www/html/storage/composer-cache \
+            -e COMPOSER_MEMORY_LIMIT=-1 \
+            flarum composer require fof/doorman --no-interaction --no-progress
+          docker compose exec -T -u www-data flarum php flarum extension:enable fof-doorman
+          docker compose exec -T -u www-data flarum php flarum cache:clear
+          curl -fsS http://localhost/ | grep -qi 'flarum' \
+            || { echo "::error::forum stopped serving after an extension install"; exit 1; }
+
       - name: Plant a marker in the database
         run: |
           docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum \
@@ -238,6 +259,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Read the Flarum version out of the committed lock so image tags can name
+      # the forum they ship. An image tag that only versions the wrapper cannot
+      # answer the question users actually have — "which Flarum is this?" — and
+      # nothing else in the tag list ever will.
+      - uses: actions/checkout@v4
+      - name: Read the pinned Flarum version
+        id: flarum
+        run: |
+          v="$(php -r '
+            $l = json_decode(file_get_contents("skeleton/composer.lock"), true);
+            foreach ($l["packages"] as $p) {
+              if ($p["name"] === "flarum/core") { echo ltrim($p["version"], "v"); exit; }
+            }
+            exit(1);
+          ')"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Flarum $v"
+
       - name: Image tags + labels
         id: meta
         uses: docker/metadata-action@v5
@@ -248,6 +287,12 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            # flarum-<version>: what forum this image contains, independent of
+            # the wrapper's own release number. Moves only when the lock does.
+            type=raw,value=flarum-${{ steps.flarum.outputs.version }},enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.flarum.outputs.version }}
+            com.linkrobins.flarum.version=${{ steps.flarum.outputs.version }}
       - name: Create the multi-arch manifest
         working-directory: /tmp/digests
         run: |

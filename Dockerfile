@@ -23,6 +23,13 @@ RUN apt-get update \
 
 # install-php-extensions pinned to a release tag (not /latest) so a compromised
 # release can't slip into a build without a git diff.
+#
+# redis is pinned too. Everything else here is compiled from the PHP source
+# already in the base image, but redis is fetched from pecl.php.net at build
+# time — which is why v1.0.0 needed three attempts while PECL returned 504s.
+# A pin does not make PECL more reliable, but it does mean a retry produces the
+# SAME extension rather than whatever is newest by then.
+ARG PECL_REDIS_VERSION=6.3.0
 RUN curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
         -o /usr/local/bin/install-php-extensions \
         https://github.com/mlocati/docker-php-extension-installer/releases/download/2.11.1/install-php-extensions \
@@ -30,13 +37,27 @@ RUN curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
     && install-php-extensions \
         bcmath ctype curl dom exif fileinfo filter gd hash intl json \
         mbstring openssl pcre pdo session sodium tokenizer xml \
-        pdo_mysql opcache redis pcntl sockets zip
+        pdo_mysql opcache "redis-${PECL_REDIS_VERSION}" pcntl sockets zip
 
-# Composer baked in (Flarum create-project / extension requires run at runtime
-# against the data volume, but the binary is present in the image).
-RUN curl -sS --retry 5 --retry-delay 2 --retry-connrefused \
-        https://getcomposer.org/installer \
-    | php -- --install-dir=/usr/local/bin --filename=composer
+# Composer pinned, and the installer's signature checked before it is run.
+#
+# This used to pipe whatever getcomposer.org served straight into php,
+# unverified and unversioned: a bad day upstream became a bad image, and two
+# builds of the same commit could ship different Composer versions. The
+# signature check is the one the Composer project publishes for exactly this.
+ARG COMPOSER_VERSION=2.10.2
+RUN set -eux; \
+    curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
+        -o /tmp/composer-setup.php https://getcomposer.org/installer; \
+    expected="$(curl -sSLf --retry 5 https://composer.github.io/installer.sig)"; \
+    actual="$(php -r 'echo hash_file("sha384", "/tmp/composer-setup.php");')"; \
+    if [ "$expected" != "$actual" ]; then \
+        echo "composer installer signature mismatch" >&2; exit 1; \
+    fi; \
+    php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer \
+        --version="${COMPOSER_VERSION}"; \
+    rm -f /tmp/composer-setup.php; \
+    composer --version
 
 # ── The pinned Flarum skeleton ───────────────────────────────────────────────
 # Flarum itself, resolved at BUILD time from the committed lock rather than
