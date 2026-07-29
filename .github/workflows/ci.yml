@@ -49,6 +49,24 @@ jobs:
       - name: Verify the fresh install serves Flarum
         run: curl -fsS http://localhost/ | grep -qi 'flarum' || { echo "::error::no Flarum markers in response"; exit 1; }
 
+      # A green install proves nothing about WHERE Flarum came from: this runner
+      # has network, so the old Packagist path would pass every check above just
+      # as well. Assert the offline path was actually taken, or the pin quietly
+      # stops being load-bearing the first time the guard breaks.
+      - name: Verify it installed from the baked skeleton, not from Packagist
+        run: |
+          logs="$(docker compose logs flarum)"
+          if ! echo "$logs" | grep -q 'from the baked skeleton'; then
+            echo "::error::fresh install did not seed from the baked skeleton"
+            echo "$logs" | tail -60
+            exit 1
+          fi
+          if echo "$logs" | grep -q 'composer create-project flarum/flarum'; then
+            echo "::error::fresh install resolved Flarum over the network"
+            exit 1
+          fi
+          echo "$logs" | grep 'from the baked skeleton'
+
       - name: Plant a marker in the database
         run: |
           docker compose exec -T mariadb mariadb -uroot -p"${DB_ROOT_PASS}" flarum \
