@@ -127,19 +127,92 @@ jobs:
         if: failure()
         run: docker compose logs --tail=300
 
-  # Build + push the image to GitHub Container Registry — only on main / version
-  # tags, and only after the round-trip above passes, so we never publish an
-  # image that failed the build/backup/restore test.
-  publish:
+  # Build each architecture on its OWN native runner, push by digest, then stitch
+  # the digests into one multi-arch tag.
+  #
+  # This used to be a single job building linux/amd64,linux/arm64 together with
+  # QEMU. That emulates arm64 instruction-for-instruction, and this image
+  # COMPILES php extensions (gd, intl) during the build, which is close to the
+  # worst case for emulation — the publish step ran ~30 minutes while the
+  # round-trip test beside it finished in a few. GitHub provides free arm64
+  # runners for public repositories, so neither architecture needs emulating.
+  #
+  # Only on main / version tags, and only after the round-trip passes, so a
+  # failed build/backup/restore is never published.
+  build:
     needs: roundtrip
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
+    # workflow_dispatch is included so the publish path can be exercised from a
+    # branch. Without it these jobs only ever run on main or a tag, which means
+    # a change to the build itself cannot be tested before it is merged — the
+    # pull request would show a green roundtrip and tell you nothing about
+    # whether the image still publishes.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build + push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          # No tag here: each arch is pushed as a bare digest and only the merge
+          # job below names it. Tagging per-arch would leave the tag pointing at
+          # whichever architecture happened to finish last.
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          # Cache is scoped per-architecture — a shared scope would have the two
+          # jobs overwrite each other's layers.
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          # Store the BARE hex, not the full "sha256:..." digest:
+          # actions/upload-artifact rejects ':' in a filename. The merge job
+          # puts the sha256: prefix back when it builds the manifest.
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          # One artifact per arch; the merge job globs them back together.
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -157,13 +230,17 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-      - name: Build + push (amd64 + arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create the multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+      - name: Verify both architectures are present
+        run: |
+          docker buildx imagetools inspect \
+            "ghcr.io/${{ github.repository }}:$(jq -r '.tags[0] | split(":")[1]' <<< "$DOCKER_METADATA_OUTPUT_JSON")" \
+            --format '{{json .Manifest}}' | jq -e '
+              [.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"] as $p
+              | if ($p | index("linux/amd64")) and ($p | index("linux/arm64"))
+                then "ok" else error("missing an architecture: \($p)") end'
