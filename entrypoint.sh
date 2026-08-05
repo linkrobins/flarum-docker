@@ -94,6 +94,31 @@ REDIS_PASSWORD=$(clean "${REDIS_PASSWORD:-}")
 TARGET_FLARUM_VERSION_SET=$([ -n "${TARGET_FLARUM_VERSION:-}" ] && echo true || echo false)
 TARGET_FLARUM_VERSION=$(clean "${TARGET_FLARUM_VERSION:-^2.0}")
 
+# Flarum 1.x is refused, deliberately and early. The 1.x path this variable
+# appeared to offer was broken three independent ways (issue #8):
+#   • install.yml pins `driver: mariadb`, which 1.8's installer rejects outright,
+#     so a fresh 1.8 install can never complete
+#   • the hard-require list carries flarum/realtime and flarum/audit, neither of
+#     which has a 1.x release, so the boot dies even after a manual install
+#   • the every-boot config sync rewrites the driver back to mariadb, so even a
+#     correct 1.8 config.php is clobbered into "Unsupported driver" on restart
+# Each needs a different workaround to get past, and 1.8 is near end of life
+# regardless. One clear refusal beats three confusing failures in a row.
+flarum_major() {
+    # First run of digits in the constraint: ^1.8, 1.8.*, ~1.8.0 and ">=1.8 <2.0"
+    # all yield 1. A constraint carrying no digits (dev-main, a branch alias)
+    # yields nothing and is left alone rather than guessed at.
+    echo "$1" | grep -oE '[0-9]+' | head -1
+}
+if [ "$TARGET_FLARUM_VERSION_SET" = "true" ]; then
+    REQUESTED_MAJOR=$(flarum_major "$TARGET_FLARUM_VERSION")
+    if [ -n "$REQUESTED_MAJOR" ] && [ "$REQUESTED_MAJOR" -lt 2 ]; then
+        die "TARGET_FLARUM_VERSION='${TARGET_FLARUM_VERSION}' asks for Flarum ${REQUESTED_MAJOR}.x, which this image does not support.
+       Flarum 1.x cannot install or boot here (linkrobins/flarum-docker#8), and 1.8 is near end of life.
+       Use Flarum 2.x (e.g. TARGET_FLARUM_VERSION=^2.0), or unset it to install the version baked into this image."
+    fi
+fi
+
 # Seed from the image unless asked otherwise. The guard on composer.json keeps
 # this correct for an image built before the skeleton existed, where the
 # directory is simply absent.
