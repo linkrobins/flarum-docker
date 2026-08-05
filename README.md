@@ -73,6 +73,40 @@ docker compose logs -f flarum
 When it's ready, visit `APP_URL` and log in with the `ADMIN_USER` /
 `ADMIN_PASS` you set in `.env`.
 
+## Updating the image
+
+**Pulling a new image does not upgrade an existing forum, by design.** The image
+tag describes what a **fresh install** gets, not what an already-installed volume
+runs. The baked Flarum only ever seeds an empty volume, so `docker compose pull`
+on a live site gives you new nginx/PHP/entrypoint and the **same** Flarum.
+
+That keeps a routine pull from becoming a database-migrating operation on a
+running forum. It does mean the tag and the forum can differ, so every boot logs
+which is which:
+
+```
+[!] WARNING: VERSION DRIFT: this forum runs Flarum 2.0.0-rc.5, this image ships 2.0.0-rc.6.
+```
+
+The same three facts are written to `storage/.flarum_version` inside the
+container, for scripting or a status check:
+
+```bash
+docker compose exec flarum cat storage/.flarum_version
+# installed=2.0.0-rc.5
+# image=2.0.0-rc.6
+# drift=true
+```
+
+Upgrading Flarum stays a deliberate act. Back up first, then either use the
+**Extension Manager** in admin, or:
+
+```bash
+docker compose exec flarum backup.sh
+docker compose exec -u www-data flarum composer update flarum/core --with-all-dependencies
+docker compose restart flarum          # runs migrations on the way back up
+```
+
 ## TLS / reverse proxy
 
 This stack publishes plain HTTP on port **80** (and the realtime websocket on

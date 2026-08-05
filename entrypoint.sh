@@ -289,6 +289,55 @@ if [ "$DO_RESTORE" = "true" ] && [ -n "$RESTORE_FILES" ] && [ -f "$RESTORE_FILES
     chown -R www-data:www-data "$WORKDIR/storage" "$WORKDIR/public/assets" 2>/dev/null || true
 fi
 
+# ── Version drift: what this image ships vs what this volume actually runs ────
+# The baked skeleton only ever seeds an EMPTY volume (see the install branch
+# above), so an existing forum keeps whatever flarum/core it was installed with,
+# including a version an admin later upgraded to through the Extension Manager,
+# which this image never hears about. Pulling a new image tag therefore does not
+# move a live forum — deliberately, see issue #7 — and until now nothing said so,
+# which left the tag describing a Flarum the operator was not running.
+#
+# This reports, and never acts. Upgrading stays a deliberate act.
+#
+# Read before the hard-require block below, so the number reflects what the
+# volume booted with rather than anything this same boot goes on to install.
+installed_core_version() {
+    php -r '
+        $f = $argv[1];
+        if (! is_readable($f)) exit(1);
+        $lock = json_decode(file_get_contents($f), true);
+        foreach (($lock["packages"] ?? []) as $p) {
+            if (($p["name"] ?? "") === "flarum/core") { echo ltrim($p["version"], "v"); exit; }
+        }
+        exit(1);
+    ' "$1" 2>/dev/null
+}
+
+VERSION_STATUS_FILE="$WORKDIR/storage/.flarum_version"
+INSTALLED_CORE=$(installed_core_version "$WORKDIR/composer.lock") || INSTALLED_CORE=""
+[ -n "$INSTALLED_CORE" ] || INSTALLED_CORE="unknown"
+
+if [ "$INSTALLED_CORE" = "unknown" ] || [ "$FLARUM_SKELETON_VERSION" = "unknown" ]; then
+    VERSION_DRIFT="unknown"
+    log "Flarum core: running '${INSTALLED_CORE}', image ships '${FLARUM_SKELETON_VERSION}' (not comparable)."
+elif [ "$INSTALLED_CORE" = "$FLARUM_SKELETON_VERSION" ]; then
+    VERSION_DRIFT="false"
+    log "Flarum core ${INSTALLED_CORE} matches the version baked into this image."
+else
+    VERSION_DRIFT="true"
+    warn "VERSION DRIFT: this forum runs Flarum ${INSTALLED_CORE}, this image ships ${FLARUM_SKELETON_VERSION}."
+    warn "  Pulling an image never upgrades an existing forum. The tag describes what a FRESH install"
+    warn "  would get, not what is running here. Nothing is broken; they are simply not the same."
+    warn "  To upgrade deliberately, back up first, then update through composer:"
+    warn "    docker compose exec flarum backup.sh"
+    warn "    docker compose exec -u www-data flarum composer update flarum/core --with-all-dependencies"
+    warn "  (or use the Extension Manager in admin). Background: linkrobins/flarum-docker#7"
+fi
+
+printf 'installed=%s\nimage=%s\ndrift=%s\n' \
+    "$INSTALLED_CORE" "$FLARUM_SKELETON_VERSION" "$VERSION_DRIFT" > "$VERSION_STATUS_FILE" 2>/dev/null || true
+chown www-data:www-data "$VERSION_STATUS_FILE" 2>/dev/null || true
+
 # ── Required extensions (hard-require — fail the boot on a composer error) ─────
 composer_require() {
     local pkg="$1"
