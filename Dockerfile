@@ -17,7 +17,7 @@ RUN printf 'Acquire::Retries "8";\nAcquire::http::Timeout "30";\nAcquire::https:
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git unzip zip curl ca-certificates supervisor \
-        netcat-openbsd mariadb-client nginx cron libgmp-dev \
+        netcat-openbsd mariadb-client postgresql-client nginx cron libgmp-dev \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,7 +37,7 @@ RUN curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
     && install-php-extensions \
         bcmath ctype curl dom exif fileinfo filter gd hash intl json \
         mbstring openssl pcre pdo session sodium tokenizer xml \
-        pdo_mysql opcache "redis-${PECL_REDIS_VERSION}" pcntl sockets zip
+        pdo_mysql pdo_pgsql pgsql opcache "redis-${PECL_REDIS_VERSION}" pcntl sockets zip
 
 # Composer pinned, and the installer's signature checked before it is run.
 #
@@ -98,6 +98,7 @@ RUN set -eu; \
 COPY nginx.conf       /etc/nginx/conf.d/flarum.conf
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY entrypoint.sh    /usr/local/bin/entrypoint.sh
+COPY lr-db.php        /usr/local/bin/lr-db.php
 COPY backup.sh        /usr/local/bin/backup.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/backup.sh \
     && rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf 2>/dev/null || true

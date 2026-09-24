@@ -29,10 +29,18 @@ composer_as_www() {
 import_db() {
     local f="$1"
     log "Importing database dump: $f"
-    case "$f" in
-        *.gz) zcat "$f" | mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" ;;
-        *)    mysql -h"$DB_HOST" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$f" ;;
-    esac
+    if [ "$DB_DRIVER" = pgsql ]; then
+        case "$f" in
+            *.dump) PGPASSWORD="$DB_PASS" pg_restore -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" --no-owner "$f" ;;
+            *.gz)   zcat "$f" | PGPASSWORD="$DB_PASS" psql -q -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" ;;
+            *)      PGPASSWORD="$DB_PASS" psql -q -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" < "$f" ;;
+        esac
+    else
+        case "$f" in
+            *.gz) zcat "$f" | mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" ;;
+            *)    mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < "$f" ;;
+        esac
+    fi
 }
 
 # Write a fresh Flarum config.php from env (used by the restore path, which
@@ -42,9 +50,9 @@ write_config_php() {
 <?php return [
     'debug' => false,
     'database' => [
-        'driver' => 'mariadb',
+        'driver' => '${DB_DRIVER}',
         'host' => '${DB_HOST}',
-        'port' => 3306,
+        'port' => ${DB_PORT},
         'database' => '${DB_NAME}',
         'username' => '${DB_USER}',
         'password' => '${DB_PASS}',
@@ -81,6 +89,21 @@ DB_HOST=$(clean "${DB_HOST:-mariadb}")
 DB_NAME=$(clean "${DB_NAME:-flarum}")
 DB_USER=$(clean "${DB_USER:-flarum}")
 DB_PASS=$(clean "${DB_PASS:-}")
+# Which database engine: mariadb (the default) or pgsql. The port defaults per
+# driver. DB_ROOT_USER/DB_ROOT_PASS are optional: when given, the database and
+# the role above are created with them (needed on Postgres, where an ordinary
+# role cannot create its own database; on MariaDB the role usually can).
+DB_DRIVER=$(clean "${DB_DRIVER:-mariadb}")
+DB_ROOT_PASS=$(clean "${DB_ROOT_PASS:-}")
+case "$DB_DRIVER" in
+    pgsql)         DB_PORT=$(clean "${DB_PORT:-5432}"); DB_ROOT_USER=$(clean "${DB_ROOT_USER:-postgres}"); PDO_SCHEME=pgsql ;;
+    mariadb|mysql) DB_PORT=$(clean "${DB_PORT:-3306}"); DB_ROOT_USER=$(clean "${DB_ROOT_USER:-root}");     PDO_SCHEME=mysql ;;
+    *) die "DB_DRIVER must be mariadb, mysql or pgsql (got '$DB_DRIVER')." ;;
+esac
+DB_DSN="$PDO_SCHEME:host=$DB_HOST;port=$DB_PORT"
+DB_DSN_DB="$DB_DSN;dbname=$DB_NAME"
+if [ "$DB_DRIVER" = pgsql ]; then DB_DSN_ROOT="$DB_DSN;dbname=postgres"; else DB_DSN_ROOT="$DB_DSN"; fi
+export DB_HOST DB_NAME DB_USER DB_PASS DB_DRIVER DB_PORT DB_ROOT_USER DB_DSN DB_DSN_DB DB_DSN_ROOT
 
 REDIS_HOST=$(clean "${REDIS_HOST:-valkey}")
 REDIS_PORT=$(clean "${REDIS_PORT:-6379}")
@@ -199,18 +222,57 @@ chown -R www-data:www-data "$WORKDIR/storage" 2>/dev/null || true
 chmod -R 775 "$WORKDIR/storage" 2>/dev/null || true
 
 # ── Wait for MariaDB + ensure the database exists ─────────────────────────────
-log "Waiting for MariaDB ($DB_HOST)..."
-for i in $(seq 1 60); do
-    if php -r "new PDO('mysql:host=$DB_HOST', '$DB_USER', '$DB_PASS');" >/dev/null 2>&1; then break; fi
-    sleep 2
-done
-php -r "
-try {
-    \$pdo = new PDO('mysql:host=$DB_HOST', '$DB_USER', '$DB_PASS');
-    \$pdo->exec('CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
-    echo 'DB ready.' . PHP_EOL;
-} catch (Exception \$e) { echo \$e->getMessage() . PHP_EOL; exit(1); }
-" || die "Could not reach/create the MariaDB database"
+log "Waiting for the database ($DB_DRIVER at $DB_HOST:$DB_PORT)..."
+if [ -n "$DB_ROOT_PASS" ]; then
+    # An administrator was given: create the role and the database with it.
+    for i in $(seq 1 60); do
+        if DB_ROOT_PASS="$DB_ROOT_PASS" php -r 'new PDO(getenv("DB_DSN_ROOT"), getenv("DB_ROOT_USER"), getenv("DB_ROOT_PASS"));' >/dev/null 2>&1; then break; fi
+        sleep 2
+    done
+    DB_ROOT_PASS="$DB_ROOT_PASS" php -r '
+    try {
+        $n = getenv("DB_NAME"); $u = getenv("DB_USER"); $p = getenv("DB_PASS");
+        $pdo = new PDO(getenv("DB_DSN_ROOT"), getenv("DB_ROOT_USER"), getenv("DB_ROOT_PASS"), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $qp = $pdo->quote($p);
+        if (getenv("DB_DRIVER") === "pgsql") {
+            // Role first, then a database it OWNS: on Postgres 15+ only the
+            // owner may create tables in the public schema.
+            $qu = "\"" . str_replace("\"", "\"\"", $u) . "\""; $qn = "\"" . str_replace("\"", "\"\"", $n) . "\"";
+            $has = $pdo->query("SELECT 1 FROM pg_roles WHERE rolname = " . $pdo->quote($u))->fetchColumn();
+            $pdo->exec($has ? "ALTER ROLE $qu WITH LOGIN PASSWORD $qp" : "CREATE ROLE $qu WITH LOGIN PASSWORD $qp");
+            $hasDb = $pdo->query("SELECT 1 FROM pg_database WHERE datname = " . $pdo->quote($n))->fetchColumn();
+            $pdo->exec($hasDb ? "ALTER DATABASE $qn OWNER TO $qu" : "CREATE DATABASE $qn OWNER $qu ENCODING \"UTF8\"");
+        } else {
+            $pdo->exec("CREATE DATABASE IF NOT EXISTS `$n` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+            $pdo->exec("CREATE USER IF NOT EXISTS `$u`@`%` IDENTIFIED BY $qp");
+            $pdo->exec("ALTER USER `$u`@`%` IDENTIFIED BY $qp");
+            $pdo->exec("GRANT ALL ON `$n`.* TO `$u`@`%`");
+            $pdo->exec("FLUSH PRIVILEGES");
+        }
+        echo "DB + user ready." . PHP_EOL;
+    } catch (Exception $e) { echo $e->getMessage() . PHP_EOL; exit(1); }
+    ' || die "Could not bootstrap the database and user as $DB_ROOT_USER"
+elif [ "$DB_DRIVER" = pgsql ]; then
+    # No administrator: the database must already exist for this role.
+    for i in $(seq 1 60); do
+        if php -r 'new PDO(getenv("DB_DSN_DB"), getenv("DB_USER"), getenv("DB_PASS"));' >/dev/null 2>&1; then break; fi
+        sleep 2
+    done
+    php -r 'new PDO(getenv("DB_DSN_DB"), getenv("DB_USER"), getenv("DB_PASS")); echo "DB ready." . PHP_EOL;' \
+        || die "Could not reach database $DB_NAME as $DB_USER (on Postgres, create it first or pass DB_ROOT_USER/DB_ROOT_PASS)"
+else
+    for i in $(seq 1 60); do
+        if php -r 'new PDO(getenv("DB_DSN"), getenv("DB_USER"), getenv("DB_PASS"));' >/dev/null 2>&1; then break; fi
+        sleep 2
+    done
+    php -r '
+    try {
+        $pdo = new PDO(getenv("DB_DSN"), getenv("DB_USER"), getenv("DB_PASS"));
+        $pdo->exec("CREATE DATABASE IF NOT EXISTS `" . getenv("DB_NAME") . "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+        echo "DB ready." . PHP_EOL;
+    } catch (Exception $e) { echo $e->getMessage() . PHP_EOL; exit(1); }
+    ' || die "Could not reach/create the MariaDB database"
+fi
 
 # ── Fresh install (only when config.php is absent) ────────────────────────────
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -258,8 +320,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 debug: false
 baseUrl: '${APP_URL}'
 databaseConfiguration:
-  driver: mariadb
+  driver: ${DB_DRIVER}
   host: '${DB_HOST}'
+  port: ${DB_PORT}
   database: '${DB_NAME}'
   username: '${DB_USER}'
   password: '${DB_PASS}'
@@ -285,8 +348,9 @@ fi
 # Keep config.php in sync with the DB + base URL on every boot.
 if [ -f "$CONFIG_FILE" ]; then
     sed -i \
-        -e "s/'driver' => 'mysql'/'driver' => 'mariadb'/g" \
+        -e "s/'driver' => '[^']*'/'driver' => '${DB_DRIVER}'/g" \
         -e "s/'host' => '[^']*'/'host' => '${DB_HOST}'/g" \
+        -e "s/'port' => [0-9]*/'port' => ${DB_PORT}/g" \
         -e "s/'database' => '[^']*'/'database' => '${DB_NAME}'/g" \
         -e "s/'username' => '[^']*'/'username' => '${DB_USER}'/g" \
         -e "s/'password' => '[^']*'/'password' => '${DB_PASS}'/g" \
@@ -457,8 +521,8 @@ if [ -n "${MAIL_HOST:-}" ]; then
     MAIL_HOST_VAL="$MAIL_HOST_VAL" MAIL_PORT="$MAIL_PORT" MAIL_USERNAME="$MAIL_USERNAME" \
     MAIL_PASSWORD_VAL="$MAIL_PASSWORD_VAL" MAIL_ENCRYPTION="$MAIL_ENCRYPTION" MAIL_FROM="$MAIL_FROM" \
     DB_HOST="$DB_HOST" DB_NAME="$DB_NAME" DB_USER="$DB_USER" DB_PASS="$DB_PASS" php -r '
-    $pdo = new PDO("mysql:host=".getenv("DB_HOST").";dbname=".getenv("DB_NAME"), getenv("DB_USER"), getenv("DB_PASS"));
-    $s = $pdo->prepare("REPLACE INTO settings (`key`, value) VALUES (?, ?)");
+    require "/usr/local/bin/lr-db.php";
+    $s = $pdo->prepare(SETTINGS_UPSERT);
     foreach ([
         "mail_driver"     => "smtp",
         "mail_host"       => getenv("MAIL_HOST_VAL"),
@@ -490,10 +554,10 @@ enable_ext "flarum-extension-manager"
 [ "$REALTIME_ENABLED" = "true" ] && enable_ext "flarum-realtime"
 
 # Route the queue through redis (Horizon picks it up).
-php -r "
-\$pdo = new PDO('mysql:host=$DB_HOST;dbname=$DB_NAME', '$DB_USER', '$DB_PASS');
-\$pdo->prepare(\"REPLACE INTO settings (\`key\`,value) VALUES ('queue_driver','redis')\")->execute();
-" || warn "Failed to set queue driver"
+php -r '
+require "/usr/local/bin/lr-db.php";
+$pdo->prepare(SETTINGS_UPSERT)->execute(["queue_driver", "redis"]);
+' || warn "Failed to set queue driver"
 
 log "Clearing Flarum cache..."
 run_as_www php "$WORKDIR/flarum" cache:clear >> "$LOG_DIR/cache_clear.log" 2>&1 || warn "cache:clear failed (non-fatal)"
