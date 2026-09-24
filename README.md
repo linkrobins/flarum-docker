@@ -28,6 +28,12 @@ extensions, and the boot script. No external services, and no telemetry.
 - **Flarum 2.0** served by nginx + php-fpm under supervisor (single app image).
 - **MariaDB 11** sidecar (the database the Flarum extension ecosystem is built and
   tested against).
+- **PostgreSQL** instead, if you prefer it: set `DB_DRIVER=pgsql` (and
+  `DB_PORT`, default 5432) and point `DB_HOST` at a Postgres 13+ server. Give
+  `DB_ROOT_USER`/`DB_ROOT_PASS` and the entrypoint creates the role and a
+  database it owns; without them the database must already exist. Flarum 2
+  supports PostgreSQL in core; check the extensions you add — a few still
+  carry MySQL-only SQL.
 - **Valkey** (Redis-compatible) for cache + queue.
 - **Horizon** queue worker (`fof/horizon` + `fof/redis`) — background jobs run
   out of process.
