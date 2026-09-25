@@ -153,6 +153,12 @@ else
     FLARUM_FROM_SKELETON=false
 fi
 REALTIME_ENABLED=$(echo "${REALTIME_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')
+# supervisord is exec'd at the end of this script and inherits our environment,
+# where its realtime program re-reads REALTIME_ENABLED to decide whether to
+# serve or idle. Without the export that check sees an unset variable whenever
+# the compose file omits it, so the extension gets enabled and the websocket
+# config written while nothing ever listens on :6001.
+export REALTIME_ENABLED
 
 # Restore-on-deploy: drop a backup in the mounted /restore dir (database.sql[.gz]
 # + optional storage.tar.gz, as produced by backup.sh) and it's imported instead
@@ -429,7 +435,11 @@ else
     warn "  would get, not what is running here. Nothing is broken; they are simply not the same."
     warn "  To upgrade deliberately, back up first, then update through composer:"
     warn "    docker compose exec flarum backup.sh"
-    warn "    docker compose exec -u www-data flarum composer update flarum/core --with-all-dependencies"
+    warn "    docker compose exec -u www-data flarum composer update 'flarum/*' --with-all-dependencies"
+    warn "    docker compose exec -u www-data flarum php flarum migrate"
+    warn "    docker compose exec -u www-data flarum php flarum cache:clear"
+    warn "  Update 'flarum/*', not flarum/core alone: the skeleton requires every bundled extension"
+    warn "  at '*', so a core-only update leaves all of them on the version they were installed at."
     warn "  (or use the Extension Manager in admin). Background: linkrobins/flarum-docker#7"
 fi
 
