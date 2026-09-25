@@ -356,6 +356,16 @@ if [ -f "$CONFIG_FILE" ]; then
         -e "s/'password' => '[^']*'/'password' => '${DB_PASS}'/g" \
         -e "s~'url' => '[^']*'~'url' => '${APP_URL}'~g" \
         "$CONFIG_FILE"
+    # The connection options the installer wrote are per engine: a config.php
+    # born on MariaDB says utf8mb4/InnoDB, which Postgres refuses at connect
+    # time before Flarum prints a word. Rewrite them for the driver in use so
+    # moving between engines is an environment change, nothing more.
+    if [ "$DB_DRIVER" = pgsql ]; then
+        sed -i -e "s/'charset' => '[^']*'/'charset' => 'utf8'/" -e "/'collation' => /d" -e "/'engine' => /d" "$CONFIG_FILE"
+    else
+        sed -i -e "s/'charset' => '[^']*'/'charset' => 'utf8mb4'/" "$CONFIG_FILE"
+        grep -q "'collation' =>" "$CONFIG_FILE" || sed -i "s/'charset' => 'utf8mb4',/'charset' => 'utf8mb4',\n    'collation' => 'utf8mb4_unicode_ci',\n    'engine' => 'InnoDB',/" "$CONFIG_FILE"
+    fi
 fi
 
 # Forced restore OVER an existing forum (RESTORE_FORCE=true). The fresh-volume
