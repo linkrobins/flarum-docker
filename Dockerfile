@@ -35,7 +35,7 @@ RUN curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
         https://github.com/mlocati/docker-php-extension-installer/releases/download/2.11.1/install-php-extensions \
     && chmod +x /usr/local/bin/install-php-extensions \
     && install-php-extensions \
-        bcmath ctype curl dom exif fileinfo filter gd hash intl json \
+        bcmath ctype curl dom exif fileinfo filter gd gmp hash intl json \
         mbstring openssl pcre pdo session sodium tokenizer xml \
         pdo_mysql pdo_pgsql pgsql opcache "redis-${PECL_REDIS_VERSION}" pcntl sockets zip
 
