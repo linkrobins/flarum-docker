@@ -5,7 +5,17 @@
 # and the boot/entrypoint scripts. There is NO runtime fetch of a setup script
 # from the network — the image is fully self-describing and reproducible.
 # ==========================================================================
-FROM php:8.3-fpm
+# 🚨 PINNED BY DIGEST, not by tag. `php:8.3-fpm` moves with every patch release,
+# so two builds of the same commit could ship different PHP. This is 8.3.35.
+#
+# A pin nobody bumps is worse than no pin — that is how this image sat on
+# Flarum rc.5 while every site ran rc.8. So: bump it deliberately, and the
+# entrypoint's drift report says when what is running no longer matches what
+# is declared here.
+#
+#   docker pull php:8.3-fpm && docker image inspect php:8.3-fpm \
+#     --format '{{index .RepoDigests 0}}'
+FROM php:8.3-fpm@sha256:e436b5b6ce4a4e632f97a66ea0ea14c5d001e229e2adc5c8ed2f7b5b5fe5c989
 
 # Ride over transient apt mirror/network blips during the build. Applies to
 # every apt-get below, including the ones install-php-extensions spawns to pull
@@ -45,7 +55,7 @@ RUN curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
 # unverified and unversioned: a bad day upstream became a bad image, and two
 # builds of the same commit could ship different Composer versions. The
 # signature check is the one the Composer project publishes for exactly this.
-ARG COMPOSER_VERSION=2.10.2
+ARG COMPOSER_VERSION=2.10.3
 RUN set -eux; \
     curl -sSLf --retry 5 --retry-delay 2 --retry-connrefused \
         -o /tmp/composer-setup.php https://getcomposer.org/installer; \
@@ -73,6 +83,13 @@ RUN set -eux; \
 ARG FLARUM_VERSION=2.0.0-rc.5
 ENV FLARUM_SKELETON=/opt/flarum-skeleton
 ENV FLARUM_SKELETON_VERSION=${FLARUM_VERSION}
+
+# Recorded so the entrypoint can report drift against what this image DECLARES
+# rather than against nothing. PHP cannot drift inside a container — it is the
+# image's own PHP — but Composer can differ from the pin if anyone runs
+# `composer self-update`, and a stale pin is invisible without something to
+# compare to.
+ENV IMAGE_COMPOSER_VERSION=${COMPOSER_VERSION}
 
 RUN COMPOSER_HOME=/tmp/composer composer create-project \
         "flarum/flarum:${FLARUM_VERSION}" "$FLARUM_SKELETON" \

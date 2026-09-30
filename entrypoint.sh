@@ -594,5 +594,21 @@ fi
   echo "* * * * * /usr/local/bin/php /var/www/html/flarum schedule:run >> /dev/null 2>&1"
 ) | crontab -u www-data -
 
+# ── Composer drift ────────────────────────────────────────────────────────
+# PHP cannot drift here: it is this image's own PHP, pinned by digest in the
+# Dockerfile. Composer can, because `composer self-update` rewrites the binary
+# in place and nothing else would ever mention it — which is how one site ran
+# 2.10.3 against an image that declared 2.10.2 for weeks.
+if [ -n "${IMAGE_COMPOSER_VERSION:-}" ] && command -v composer >/dev/null 2>&1; then
+    RUNNING_COMPOSER="$(composer --version --no-ansi 2>/dev/null | awk '/^Composer version/{print $3}')"
+    if [ -n "$RUNNING_COMPOSER" ] && [ "$RUNNING_COMPOSER" != "$IMAGE_COMPOSER_VERSION" ]; then
+        warn "COMPOSER DRIFT: running ${RUNNING_COMPOSER}, this image declares ${IMAGE_COMPOSER_VERSION}."
+        warn "  Someone ran 'composer self-update' in this container, or the image was built before"
+        warn "  the pin changed. Rebuild the image to get back to the declared version."
+    else
+        log "Composer ${RUNNING_COMPOSER} matches the version this image declares."
+    fi
+fi
+
 log "All done. Starting supervisord."
 exec /usr/bin/supervisord -c "$SUPERVISOR_CONF"
