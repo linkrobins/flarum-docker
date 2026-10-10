@@ -1,5 +1,7 @@
 # Self-Hosted Flarum 2.0 (Docker)
 
+> **Retired (October 2026).** This project is no longer maintained, and the repository is archived and read-only. It gets no updates or security fixes, and issues and pull requests are closed. The code stays here for reference under its license.
+
 [![CI — build + backup/restore round-trip](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml/badge.svg)](https://github.com/linkrobins/flarum-docker/actions/workflows/ci.yml)
 
 A complete, self-contained [Flarum 2.0](https://flarum.org) stack in three
